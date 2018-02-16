@@ -132,8 +132,7 @@ class Mysql(BaseSQLQueryRunner):
         return schema.values()
 
     def run_query(self, query, user):
-        ev = threading.Event()
-        thread_id = ""
+        thread_id = 0
         r = Result()
         t = None
         try:
@@ -146,16 +145,16 @@ class Mysql(BaseSQLQueryRunner):
                                          ssl=self._get_ssl_parameters(),
                                          connect_timeout=60)
             thread_id = connection.thread_id()
-            logger.warning("get_thread_id: %d", thread_id)
+            logger.debug("thread_id: %d", thread_id)
 
-            t = threading.Thread(target=self._run_query,args=(query, user, connection, r, ev))
+            t = threading.Thread(target=self._run_query,args=(query, user, connection, r))
             t.start()
-            while ev.wait(1) != True:
-                pass
+            while t.is_alive() == True:
+                t.join(1)
         except (KeyboardInterrupt, InterruptException):
-            logger.warning("waiting for end of Interrupted sub thread")
             error = self._cancel(thread_id)
-            t.join()
+            if t.is_alive() == True:
+                t.join()
             r.json_data = None
             r.error = "Query cancelled by user."
             if error is not None:
@@ -163,7 +162,7 @@ class Mysql(BaseSQLQueryRunner):
 
         return r.json_data, r.error
 
-    def _run_query(self, query, user, connection, result, ev):
+    def _run_query(self, query, user, connection, result):
         try:
             cursor = connection.cursor()
             logger.debug("MySQL running query: %s", query)
@@ -193,7 +192,6 @@ class Mysql(BaseSQLQueryRunner):
             result.json_data = None
             result.error = e.args[1]
         finally:
-            ev.set()
             if connection:
                 connection.close()
 
