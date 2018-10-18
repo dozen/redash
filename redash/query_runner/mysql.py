@@ -5,6 +5,13 @@ import os
 from redash.query_runner import *
 from redash.settings import parse_boolean
 from redash.utils import JSONEncoder
+from redash.query_runner import InterruptException
+
+try:
+    import pymysql.cursors
+    enabled = True
+except ImportError:
+    enabled = False
 
 logger = logging.getLogger(__name__)
 types_map = {
@@ -90,12 +97,7 @@ class Mysql(BaseSQLQueryRunner):
 
     @classmethod
     def enabled(cls):
-        try:
-            import MySQLdb
-        except ImportError:
-            return False
-
-        return True
+        return enabled
 
     def _get_tables(self, schema):
         query = """
@@ -127,11 +129,10 @@ class Mysql(BaseSQLQueryRunner):
         return schema.values()
 
     def run_query(self, query, user):
-        import MySQLdb
-
         connection = None
+        thread_id = None
         try:
-            connection = MySQLdb.connect(host=self.configuration.get('host', ''),
+            connection = pymysql.connect(host=self.configuration.get('host', ''),
                                          user=self.configuration.get('user', ''),
                                          passwd=self.configuration.get('passwd', ''),
                                          db=self.configuration['db'],
@@ -139,6 +140,7 @@ class Mysql(BaseSQLQueryRunner):
                                          charset='utf8', use_unicode=True,
                                          ssl=self._get_ssl_parameters(),
                                          connect_timeout=60)
+            thread_id = connection.thread_id()
             cursor = connection.cursor()
             logger.debug("MySQL running query: %s", query)
             cursor.execute(query)
@@ -161,12 +163,14 @@ class Mysql(BaseSQLQueryRunner):
                 error = "No data was returned."
 
             cursor.close()
-        except MySQLdb.Error as e:
+        except InterruptException:
             json_data = None
-            error = e.args[1]
-        except KeyboardInterrupt:
-            cursor.close()
             error = "Query cancelled by user."
+            cancel_error = self._cancel(thread_id)
+            if cancel_error:
+                error = cancel_error
+        except Exception as e:
+            error = e.args[1]
             json_data = None
         finally:
             if connection:
@@ -187,6 +191,32 @@ class Mysql(BaseSQLQueryRunner):
                     ssl_params[cfg] = val
 
         return ssl_params
+
+    def _cancel(self, thread_id):
+        error = None
+
+        if thread_id is None:
+            return error
+
+        try:
+            connection = pymysql.connect(host=self.configuration.get('host', ''),
+                                         user=self.configuration.get('user', ''),
+                                         passwd=self.configuration.get('passwd', ''),
+                                         db=self.configuration['db'],
+                                         port=self.configuration.get('port', 3306),
+                                         charset='utf8', use_unicode=True,
+                                         ssl=self._get_ssl_parameters(),
+                                         connect_timeout=60)
+            cursor = connection.cursor()
+            cursor.execute("KILL %d" % (thread_id))
+        except Exception as e:
+            error = e.args[1]
+        finally:
+            if connection:
+                connection.close()
+            if cursor:
+                cursor.close()
+        return error
 
 
 class RDSMySQL(Mysql):
